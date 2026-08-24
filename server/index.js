@@ -1,12 +1,17 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { readDb, writeDb, nextId } from './db.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 5050;
 const JWT_SECRET = process.env.JWT_SECRET || 'moviebox-dev-secret-change-me';
+const distPath = path.join(__dirname, '..', 'dist');
 
 app.use(cors());
 app.use(express.json());
@@ -588,6 +593,14 @@ app.put('/api/admin/settings', authRequired, adminRequired, (req, res) => {
   res.json(db.settings);
 });
 
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+}
+
 ensureSeed().then(() => {
   const server = app.listen(PORT, (err) => {
     if (err) {
@@ -595,7 +608,7 @@ ensureSeed().then(() => {
       process.exit(1);
       return;
     }
-    console.log(`MovieBox API running on http://localhost:${PORT}`);
+    console.log(`MovieBox running on http://localhost:${PORT}`);
   });
   server.on('error', (err) => {
     console.error('MovieBox API failed to start:', err.message);
