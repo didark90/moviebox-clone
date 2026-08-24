@@ -3,7 +3,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.join(__dirname, 'data');
+const dataDir = process.env.VERCEL
+  ? '/tmp/moviebox-data'
+  : path.join(__dirname, 'data');
 const dbPath = path.join(dataDir, 'db.json');
 
 function emptyDb() {

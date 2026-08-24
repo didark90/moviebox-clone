@@ -28,6 +28,12 @@ npm start
 
 Then open [http://localhost:5050](http://localhost:5050). The server serves the built frontend and the API together.
 
+## Vercel
+
+This repo is set up so Vercel hosts the React app **and** the `/api` backend. After you push, movies, theaters, login, and signup should work on the live URL.
+
+Demo data lives in a temporary file on Vercel, so it can reset when the server sleeps.
+
 ## Demo accounts
 
 - User: `john@example.com` / `User123!`

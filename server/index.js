@@ -16,6 +16,16 @@ const distPath = path.join(__dirname, '..', 'dist');
 app.use(cors());
 app.use(express.json());
 
+app.use((req, _res, next) => {
+  if (process.env.VERCEL) {
+    const url = req.url || '/';
+    if (!url.startsWith('/api')) {
+      req.url = url === '/' ? '/api' : `/api${url.startsWith('/') ? url : `/${url}`}`;
+    }
+  }
+  next();
+});
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PASSWORD_RE = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
 
@@ -376,6 +386,10 @@ app.get('/api/theaters', (req, res) => {
   res.json(theaters);
 });
 
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
 app.get('/api/showtimes/:movieId/:showtimeId/seats', (req, res) => {
   const db = readDb();
   const movie = db.movies.find((m) => String(m.id) === String(req.params.movieId));
@@ -593,7 +607,7 @@ app.put('/api/admin/settings', authRequired, adminRequired, (req, res) => {
   res.json(db.settings);
 });
 
-if (fs.existsSync(distPath)) {
+if (!process.env.VERCEL && fs.existsSync(distPath)) {
   app.use(express.static(distPath));
   app.use((req, res, next) => {
     if (req.path.startsWith('/api')) return next();
@@ -601,17 +615,21 @@ if (fs.existsSync(distPath)) {
   });
 }
 
-ensureSeed().then(() => {
-  const server = app.listen(PORT, (err) => {
-    if (err) {
-      console.error('MovieBox API failed to start:', err.message || err);
+if (!process.env.VERCEL) {
+  ensureSeed().then(() => {
+    const server = app.listen(PORT, (err) => {
+      if (err) {
+        console.error('MovieBox API failed to start:', err.message || err);
+        process.exit(1);
+        return;
+      }
+      console.log(`MovieBox running on http://localhost:${PORT}`);
+    });
+    server.on('error', (err) => {
+      console.error('MovieBox API failed to start:', err.message);
       process.exit(1);
-      return;
-    }
-    console.log(`MovieBox running on http://localhost:${PORT}`);
+    });
   });
-  server.on('error', (err) => {
-    console.error('MovieBox API failed to start:', err.message);
-    process.exit(1);
-  });
-});
+}
+
+export { app, ensureSeed };
