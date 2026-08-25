@@ -17,6 +17,7 @@ dist-ssr
 
 # Local API data (re-seeded on server start)
 server/data/db.json
+server/data/french-cinema-cache.json
 
 # Editor directories and files
 .vscode/*

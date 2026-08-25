@@ -7,6 +7,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { readDb, writeDb, nextId } from './db.js';
 import { fetchMovieDetails, fetchMovieList, hasRapidApiKey } from './rapidMovies.js';
+import { fetchFrenchShowtimes, fetchFrenchTheaters, THEATER_CITIES } from './frenchCinema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -45,6 +46,8 @@ function authRequired(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Please log in first' });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
+    const dbUser = readDb().users.find((u) => u.id === req.user.id);
+    if (dbUser) req.user.role = dbUser.role;
     next();
   } catch {
     return res.status(401).json({ error: 'Session expired. Please log in again' });
@@ -52,7 +55,8 @@ function authRequired(req, res, next) {
 }
 
 function adminRequired(req, res, next) {
-  if (req.user?.role !== 'admin') {
+  const dbUser = readDb().users.find((u) => u.id === req.user?.id);
+  if (!dbUser || dbUser.role !== 'admin') {
     return res.status(403).json({ error: 'Admin access required' });
   }
   next();
@@ -264,6 +268,8 @@ async function ensureSeed() {
     changed = true;
   }
   if (!db.messages) db.messages = [];
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  if (backfillNotifications(db)) changed = true;
   if (!db.settings) {
     db.settings = {
       venmoUsername: '@MovieBox-Cinema',
@@ -275,6 +281,62 @@ async function ensureSeed() {
   }
 
   if (changed) writeDb(db);
+}
+
+function pushNotification(db, note) {
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  db.notifications.unshift({
+    id: nextId(db.notifications),
+    read: false,
+    createdAt: new Date().toISOString(),
+    ...note
+  });
+  db.notifications = db.notifications.slice(0, 40);
+}
+
+function backfillNotifications(db) {
+  if (Array.isArray(db.notifications) && db.notifications.length) return false;
+  db.notifications = [];
+  const bookings = [...(db.bookings || [])].sort(
+    (a, b) => new Date(b.bookingDate || 0) - new Date(a.bookingDate || 0)
+  ).slice(0, 8);
+  const messages = [...(db.messages || [])].sort(
+    (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+  ).slice(0, 5);
+  const users = [...(db.users || [])]
+    .filter((u) => u.role !== 'admin')
+    .sort((a, b) => String(b.joinDate || '').localeCompare(String(a.joinDate || '')))
+    .slice(0, 3);
+
+  for (const b of bookings.reverse()) {
+    pushNotification(db, {
+      type: 'booking',
+      tab: 'bookings',
+      title: b.paymentStatus === 'cancelled' ? 'Booking cancelled' : 'New booking',
+      body: `${b.user || 'A customer'} booked ${b.movie || 'a movie'} · ${Array.isArray(b.seats) ? b.seats.join(', ') : ''}`.trim(),
+      createdAt: b.bookingDate || new Date().toISOString()
+    });
+  }
+  for (const m of messages.reverse()) {
+    pushNotification(db, {
+      type: 'message',
+      tab: 'dashboard',
+      title: 'Contact message',
+      body: `${m.name}: ${String(m.message || '').slice(0, 80)}`,
+      createdAt: m.createdAt || new Date().toISOString()
+    });
+  }
+  for (const u of users.reverse()) {
+    pushNotification(db, {
+      type: 'user',
+      tab: 'users',
+      title: 'New customer',
+      body: `${u.name} signed up (${u.email})`,
+      createdAt: u.joinDate ? `${u.joinDate}T12:00:00.000Z` : new Date().toISOString()
+    });
+  }
+  db.notifications.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  return true;
 }
 
 function validateSignup({ name, email, password, confirmPassword }) {
@@ -317,6 +379,12 @@ app.post('/api/auth/signup', async (req, res) => {
     lastActive: new Date().toISOString().slice(0, 10)
   };
   db.users.push(user);
+  pushNotification(db, {
+    type: 'user',
+    tab: 'users',
+    title: 'New customer',
+    body: `${user.name} signed up (${user.email})`
+  });
   writeDb(db);
   res.status(201).json({ token: signToken(user), user: publicUser(user) });
 });
@@ -403,16 +471,29 @@ app.get('/api/movies/:id', async (req, res) => {
   res.json(movie);
 });
 
-app.get('/api/theaters', (req, res) => {
-  const db = readDb();
-  const q = (req.query.q || '').toLowerCase();
-  let theaters = db.theaters;
-  if (q) {
-    theaters = theaters.filter((t) =>
-      `${t.name} ${t.city} ${t.address}`.toLowerCase().includes(q)
-    );
+app.get('/api/theaters/cities', (_req, res) => {
+  res.json(THEATER_CITIES.map((row) => row.city));
+});
+
+app.get('/api/theaters', async (req, res) => {
+  const q = req.query.q || '';
+  try {
+    const remote = await fetchFrenchTheaters(q);
+    return res.json(remote);
+  } catch (err) {
+    console.error('French cinema theaters failed:', err.message);
+    return res.status(502).json({ error: err.message || 'Theater listings are unavailable right now' });
   }
-  res.json(theaters);
+});
+
+app.get('/api/theaters/:id/showtimes', async (req, res) => {
+  try {
+    const payload = await fetchFrenchShowtimes(req.params.id, req.query.date);
+    return res.json(payload);
+  } catch (err) {
+    console.error('French cinema showtimes failed:', err.message);
+    return res.status(502).json({ error: err.message || 'Showtimes are unavailable right now' });
+  }
 });
 
 app.get('/api/health', (_req, res) => {
@@ -457,6 +538,12 @@ app.post('/api/contact', (req, res) => {
     email: email.trim().toLowerCase(),
     message: message.trim(),
     createdAt: new Date().toISOString()
+  });
+  pushNotification(db, {
+    type: 'message',
+    tab: 'dashboard',
+    title: 'Contact message',
+    body: `${name.trim()}: ${message.trim().slice(0, 80)}`
   });
   writeDb(db);
   res.status(201).json({ ok: true, message: 'Thanks! We will get back to you soon.' });
@@ -513,6 +600,12 @@ app.post('/api/bookings', authRequired, async (req, res) => {
     movieDuration: movie.duration
   };
   db.bookings.push(booking);
+  pushNotification(db, {
+    type: 'booking',
+    tab: 'bookings',
+    title: 'New booking',
+    body: `${booking.user} booked ${booking.movie} · ${booking.seats.join(', ')}`
+  });
   writeDb(db);
   res.status(201).json(booking);
 });
@@ -546,9 +639,46 @@ app.patch('/api/admin/bookings/:id', authRequired, adminRequired, (req, res) => 
   const db = readDb();
   const booking = db.bookings.find((b) => b.id === req.params.id);
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
-  if (req.body.paymentStatus) booking.paymentStatus = req.body.paymentStatus;
+  if (req.body.paymentStatus) {
+    booking.paymentStatus = req.body.paymentStatus;
+    pushNotification(db, {
+      type: 'booking',
+      tab: 'bookings',
+      title: req.body.paymentStatus === 'cancelled' ? 'Booking cancelled' : 'Booking updated',
+      body: `${booking.movie} for ${booking.user} is now ${req.body.paymentStatus}`
+    });
+  }
   writeDb(db);
   res.json(booking);
+});
+
+app.get('/api/admin/notifications', authRequired, adminRequired, (req, res) => {
+  const db = readDb();
+  const notifications = Array.isArray(db.notifications) ? db.notifications : [];
+  res.json({
+    notifications,
+    unread: notifications.filter((n) => !n.read).length
+  });
+});
+
+app.patch('/api/admin/notifications/:id/read', authRequired, adminRequired, (req, res) => {
+  const db = readDb();
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  const note = db.notifications.find((n) => String(n.id) === String(req.params.id));
+  if (!note) return res.status(404).json({ error: 'Notification not found' });
+  note.read = true;
+  writeDb(db);
+  res.json(note);
+});
+
+app.post('/api/admin/notifications/read-all', authRequired, adminRequired, (req, res) => {
+  const db = readDb();
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  db.notifications.forEach((n) => {
+    n.read = true;
+  });
+  writeDb(db);
+  res.json({ ok: true, unread: 0 });
 });
 
 app.get('/api/admin/users', authRequired, adminRequired, (req, res) => {
