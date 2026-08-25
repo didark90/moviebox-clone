@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { readDb, writeDb, nextId } from './db.js';
+import { fetchMovieDetails, fetchMovieList, hasRapidApiKey } from './rapidMovies.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -346,30 +347,58 @@ app.get('/api/auth/me', authRequired, (req, res) => {
   res.json({ user: publicUser(user) });
 });
 
-app.get('/api/movies', (req, res) => {
+function withShowtimes(movie) {
+  if (!movie) return null;
+  return { ...movie, showtimes: movie.showtimes?.length ? movie.showtimes : DEFAULT_SHOWTIMES };
+}
+
+async function resolveMovie(id) {
   const db = readDb();
+  const local = db.movies.find((m) => String(m.id) === String(id));
+  if (local) return withShowtimes(local);
+  if (!hasRapidApiKey()) return null;
+  try {
+    return withShowtimes(await fetchMovieDetails(id));
+  } catch {
+    return null;
+  }
+}
+
+app.get('/api/movies', async (req, res) => {
   const q = (req.query.q || '').toLowerCase();
   const location = (req.query.location || '').toLowerCase();
+  const db = readDb();
+
+  const applyLocation = (movies) => {
+    if (!location) return movies;
+    const theaterNames = db.theaters
+      .filter((t) => `${t.city} ${t.address} ${t.name}`.toLowerCase().includes(location))
+      .flatMap((t) => t.screens);
+    return movies.filter((m) =>
+      (m.showtimes || DEFAULT_SHOWTIMES).some((s) => theaterNames.includes(s.theater))
+    );
+  };
+
+  if (hasRapidApiKey()) {
+    try {
+      const remote = await fetchMovieList(req.query.q || '');
+      return res.json(applyLocation(remote.map(withShowtimes)));
+    } catch (err) {
+      console.error('RapidAPI list failed, using local movies:', err.message);
+    }
+  }
+
   let movies = db.movies.filter((m) => m.status !== 'inactive');
   if (q) {
     movies = movies.filter((m) =>
       `${m.title} ${m.genre} ${m.director}`.toLowerCase().includes(q)
     );
   }
-  if (location) {
-    const theaterNames = db.theaters
-      .filter((t) => `${t.city} ${t.address} ${t.name}`.toLowerCase().includes(location))
-      .flatMap((t) => t.screens);
-    movies = movies.filter((m) =>
-      (m.showtimes || []).some((s) => theaterNames.includes(s.theater))
-    );
-  }
-  res.json(movies);
+  res.json(applyLocation(movies));
 });
 
-app.get('/api/movies/:id', (req, res) => {
-  const db = readDb();
-  const movie = db.movies.find((m) => String(m.id) === String(req.params.id));
+app.get('/api/movies/:id', async (req, res) => {
+  const movie = await resolveMovie(req.params.id);
   if (!movie) return res.status(404).json({ error: 'Movie not found' });
   res.json(movie);
 });
@@ -390,9 +419,9 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/showtimes/:movieId/:showtimeId/seats', (req, res) => {
+app.get('/api/showtimes/:movieId/:showtimeId/seats', async (req, res) => {
   const db = readDb();
-  const movie = db.movies.find((m) => String(m.id) === String(req.params.movieId));
+  const movie = await resolveMovie(req.params.movieId);
   if (!movie) return res.status(404).json({ error: 'Movie not found' });
   const showtime = (movie.showtimes || []).find((s) => String(s.id) === String(req.params.showtimeId));
   if (!showtime) return res.status(404).json({ error: 'Showtime not found' });
@@ -433,7 +462,7 @@ app.post('/api/contact', (req, res) => {
   res.status(201).json({ ok: true, message: 'Thanks! We will get back to you soon.' });
 });
 
-app.post('/api/bookings', authRequired, (req, res) => {
+app.post('/api/bookings', authRequired, async (req, res) => {
   const { movieId, showtimeId, seats, paymentMethod } = req.body || {};
   const errors = {};
   if (!movieId) errors.movieId = 'Movie is required';
@@ -443,7 +472,7 @@ app.post('/api/bookings', authRequired, (req, res) => {
 
   const db = readDb();
   const user = db.users.find((u) => u.id === req.user.id);
-  const movie = db.movies.find((m) => String(m.id) === String(movieId));
+  const movie = await resolveMovie(movieId);
   if (!movie) return res.status(404).json({ error: 'Movie not found' });
   const showtime = (movie.showtimes || []).find((s) => String(s.id) === String(showtimeId));
   if (!showtime) return res.status(404).json({ error: 'Showtime not found' });

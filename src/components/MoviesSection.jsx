@@ -42,6 +42,9 @@ const MoviesSection = () => {
               Showing results for “{q || location}”
             </p>
           )}
+          {movies[0]?.source === 'rapidapi' && (
+            <p className="text-sm text-gold-400 mt-2">Live titles from RapidAPI</p>
+          )}
         </motion.div>
 
         {error && <p className="text-center text-red-400 mb-8">{error}</p>}
